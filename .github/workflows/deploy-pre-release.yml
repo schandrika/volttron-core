@@ -75,31 +75,42 @@ jobs:
         run: |
           poetry install --no-interaction
 
-      #----------------------------------------------
-      # bump version number for patch
-      #----------------------------------------------
-      - name: Bump Version
+      - name: bump pyproject.toml version
         run: |
-          # current_tag is the last tagged relese in the repository.   From there
-          # we need to remove the v from the begining of the tag.
-          if ! $(git tag -l "v*" = ''); then
-            current_tag=$(git tag -l "v*" | sort --reverse |sed -n 1p)
-          else
-            current_tag=v10.0.0
-          fi
+            current_version=$(poetry version --short)
+            echo $current_version
+            poetry version prerelease --no-interaction
+            NEW_TAG=v$(poetry version --short)
+            echo "NEW_TAG=$(echo ${NEW_TAG})" >> $GITHUB_ENV
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: bumped pre-release version
 
-          current_tag=${current_tag#?}
-
-          # current_tag is now the version we want to set our poetry version so
-          # that we can bump the version
-          poetry version ${current_tag}
-          poetry version prerelease --no-interaction
-
-          NEW_TAG=v$(poetry version --short)
-
-          # Finally because we want to be able to use the variable in later
-          # steps we set a NEW_TAG environmental variable
-          echo "NEW_TAG=$(echo ${NEW_TAG})" >> $GITHUB_ENV
+#      #----------------------------------------------
+#      # bump version number for patch
+#      #----------------------------------------------
+#      - name: Bump Version
+#        run: |
+#          # current_tag is the last tagged relese in the repository.   From there
+#          # we need to remove the v from the begining of the tag.
+#          if ! $(git tag -l "v*" = ''); then
+#            current_tag=$(git tag -l "v*" | sort --reverse |sed -n 1p)
+#          else
+#            current_tag=v10.0.0
+#          fi
+#
+#          current_tag=${current_tag#?}
+#
+#          # current_tag is now the version we want to set our poetry version so
+#          # that we can bump the version
+#          poetry version ${current_tag}
+#          poetry version prerelease --no-interaction
+#
+#          NEW_TAG=v$(poetry version --short)
+#
+#          # Finally because we want to be able to use the variable in later
+#          # steps we set a NEW_TAG environmental variable
+#          echo "NEW_TAG=$(echo ${NEW_TAG})" >> $GITHUB_ENV
 
       #---------------------------------------------------------------
       # create build artifacts to be included as part of release
