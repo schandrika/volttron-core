@@ -2,9 +2,10 @@ name: update pyproject.toml version
 
 on:
   pull_request:
-  push:
     branches:
       - develop
+    types:
+      - opened
 env:
   LANG: en_US.utf-8
   LC_ALL: en_US.utf-8
