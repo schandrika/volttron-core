@@ -22,7 +22,6 @@ This package contains the essential server and client component of Eclipse VOLTT
 
 It is highly recommended you use a virtual environment for installing VOLTTRON.
 
-
 ```shell
 python -m venv <directory name for your virtual env. for example .venv>
 source .venv/bin/activate
