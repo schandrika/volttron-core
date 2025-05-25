@@ -20,7 +20,7 @@ Eclipse VOLTTRON (eclipse-volttron/volttron-core) is an open source platform for
 
 This package contains the essential server and client component of Eclipse VOLTTRON framework. In order to start VOLTTRON in addition to this package(volttron-core) you also need volttron-lib-auth and volttron-lib-zmq. 
 
-It is highly recommended you use a virtual environment for installing VOLTTRON.
+It is highly recommended you use a virtual environment for installing VOLTTRON....
 
 ```shell
 python -m venv <directory name for your virtual env. for example .venv>
