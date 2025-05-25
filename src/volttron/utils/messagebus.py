@@ -1,8 +1,32 @@
-from configparser import ConfigParser
+# -*- coding: utf-8 -*- {{{
+# ===----------------------------------------------------------------------===
+#
+#                 Installable Component of Eclipse VOLTTRON
+#
+# ===----------------------------------------------------------------------===
+#
+# Copyright 2022 Battelle Memorial Institute
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy
+# of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+#
+# ===----------------------------------------------------------------------===
+# }}}
+
 import logging
 import os
+from configparser import ConfigParser
 
-from ..utils import ClientContext as cc
+from volttron.utils import ClientContext as cc
 
 _log = logging.getLogger(__name__)
 
@@ -24,7 +48,7 @@ def store_message_bus_config(message_bus, instance_name):
     if os.path.exists(config_path):
         config = ConfigParser()
         config.read(config_path)
-        config.set("volttron", "message-bus", message_bus)
+        config.set("volttron", "messagebus", message_bus)
         config.set("volttron", "instance-name", instance_name)
         with open(config_path, "w") as configfile:
             config.write(configfile)
@@ -33,47 +57,10 @@ def store_message_bus_config(message_bus, instance_name):
             os.makedirs(v_home, 0o755)
         config = ConfigParser()
         config.add_section("volttron")
-        config.set("volttron", "message-bus", message_bus)
+        config.set("volttron", "messagebus", message_bus)
         config.set("volttron", "instance-name", instance_name)
 
         with open(config_path, "w") as configfile:
             config.write(configfile)
         # all agents need read access to config file
         os.chmod(config_path, 0o744)
-
-
-def update_kwargs_with_config(kwargs, config):
-    """
-    Loads the user defined configurations into kwargs.
-
-      1. Converts any dash/hyphen in config variables into underscores
-      2. Checks for configured "identity" value. Prints a deprecation
-      warning and uses it.
-      3. Checks for configured "agentid" value. Prints a deprecation warning
-      and ignores it
-
-    :param kwargs: kwargs to be updated
-    :param config: dictionary of user/agent configuration
-    """
-
-    if config.get("identity") is not None:
-        _log.warning("DEPRECATION WARNING: Setting a historian's VIP IDENTITY"
-                     " from its configuration file will no longer be supported"
-                     " after VOLTTRON 4.0")
-        _log.warning("DEPRECATION WARNING: Using the identity configuration setting "
-                     "will override the value provided by the platform. This new value "
-                     "will not be reported correctly by 'volttron-ctl status'")
-        _log.warning("DEPRECATION WARNING: Please remove 'identity' from your "
-                     "configuration file and use the new method provided by "
-                     "the platform to set an agent's identity. See "
-                     "scripts/core/make-mongo-historian.sh for an example of "
-                     "how this is done.")
-
-    if config.get("agentid") is not None:
-        _log.warning("WARNING: Agent id cannot be configured. It is a unique "
-                     "id assigned by VOLTTRON platform. Ignoring configured "
-                     "agentid")
-        config.pop("agentid")
-
-    for k, v in config.items():
-        kwargs[k.replace("-", "_")] = v

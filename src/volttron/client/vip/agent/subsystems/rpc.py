@@ -1,66 +1,50 @@
 # -*- coding: utf-8 -*- {{{
-# vim: set fenc=utf-8 ft=python sw=4 ts=4 sts=4 et:
+# ===----------------------------------------------------------------------===
 #
-# Copyright 2020, Battelle Memorial Institute.
+#                 Installable Component of Eclipse VOLTTRON
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# ===----------------------------------------------------------------------===
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+# Copyright 2022 Battelle Memorial Institute
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy
+# of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
 #
-# This material was prepared as an account of work sponsored by an agency of
-# the United States Government. Neither the United States Government nor the
-# United States Department of Energy, nor Battelle, nor any of their
-# employees, nor any jurisdiction or organization that has cooperated in the
-# development of these materials, makes any warranty, express or
-# implied, or assumes any legal liability or responsibility for the accuracy,
-# completeness, or usefulness or any information, apparatus, product,
-# software, or process disclosed, or represents that its use would not infringe
-# privately owned rights. Reference herein to any specific commercial product,
-# process, or service by trade name, trademark, manufacturer, or otherwise
-# does not necessarily constitute or imply its endorsement, recommendation, or
-# favoring by the United States Government or any agency thereof, or
-# Battelle Memorial Institute. The views and opinions of authors expressed
-# herein do not necessarily state or reflect those of the
-# United States Government or any agency thereof.
-#
-# PACIFIC NORTHWEST NATIONAL LABORATORY operated by
-# BATTELLE for the UNITED STATES DEPARTMENT OF ENERGY
-# under Contract DE-AC05-76RL01830
+# ===----------------------------------------------------------------------===
 # }}}
 
 import inspect
-import logging
 import os
 import sys
 import traceback
 import weakref
-import re
 
 import gevent.local
 from gevent.event import AsyncResult
-from volttron.utils import jsonapi
 
-from .base import SubsystemBase
-from ..results import counter, ResultsDictionary
+
+from volttron.utils import jsonapi, jsonrpc
+from volttron.client.known_identities import AUTH, CONTROL, CONTROL_CONNECTION
 from ..decorators import annotate, annotations, dualmethod, spawn
-from volttron.utils import jsonrpc
-
-from zmq import ZMQError
-from zmq.green import ENOTSOCK
+from volttron.client.vip.agent.results import ResultsDictionary, counter
+from volttron.client.vip.agent.subsystems.base import SubsystemBase
+from volttron.client.vip.agent import VIPError
 
 __all__ = ["RPC"]
 
 _ROOT_PACKAGE_PATH = (os.path.dirname(__import__(__name__.split(".", 1)[0]).__path__[-1]) + os.sep)
+from volttron.client.logs import get_logger
 
-_log = logging.getLogger(__name__)
+_log = get_logger()
 
 
 def _isregex(obj):
@@ -172,8 +156,7 @@ class Dispatcher(jsonrpc.Dispatcher):
             if p.default is not inspect.Parameter.empty:
                 response["params"][p.name]["default"] = p.default
             if p.annotation is not inspect.Parameter.empty:
-                annotation = (p.annotation.__name__
-                              if type(p.annotation) is type else str(p.annotation))
+                annotation = (p.annotation.__name__ if type(p.annotation) is type else str(p.annotation))
                 response["params"][p.name]["annotation"] = annotation
         doc = inspect.getdoc(method)
         if doc:
@@ -211,12 +194,12 @@ class RPC(SubsystemBase):
             self._handle_error,
         )
         self._isconnected = True
-        self._message_bus = self.core().messagebus
         self.peerlist_subsystem = peerlist_subsys
         self.peer_list = {}
+        self._protected_rpcs = None
 
         def export(member):    # pylint: disable=redefined-outer-name
-            for name in annotations(member, set, "rpc.exports"):
+            for name in annotations(member, set, "__rpc__.exports"):
                 self._exports[name] = member
 
         inspect.getmembers(owner, export)
@@ -225,11 +208,11 @@ class RPC(SubsystemBase):
             # pylint: disable=unused-argument
             self.context = gevent.local.local()
             self._dispatcher = Dispatcher(self._exports, self.context)
+            self.export(self._add_protected_rpcs, "rpc.add_protected_rpcs")
 
         core.onsetup.connect(setup, self)
         core.ondisconnected.connect(self._disconnected)
         core.onconnected.connect(self._connected)
-        self._iterate_exports()
 
     def _connected(self, sender, **kwargs):
         self._isconnected = True
@@ -256,98 +239,73 @@ class RPC(SubsystemBase):
         except KeyError:
             pass
 
-    def _iterate_exports(self):
-        """
-        Iterates over exported methods and adds authorization checks
-        as necessary
-        """
-        for method_name in self._exports:
-            method = self._exports[method_name]
-            caps = annotations(method, set, "rpc.allow_capabilities")
-            if caps:
-                self._exports[method_name] = self._add_auth_check(method, caps)
-
-    def _add_auth_check(self, method, required_caps):
+    def _add_auth_check(self, method):
         """
         Adds an authorization check to verify the calling agent has the
         required capabilities.
         """
 
         def checked_method(*args, **kwargs):
-            user = str(self.context.vip_message.user)
-            if self._message_bus == "rmq":
-                # When we address issue #2107 external platform user should
-                # have instance name also included in username.
-                user = user.split(".")[1]
-            user_capabilites = self._owner.vip.auth.get_capabilities(user)
-            _log.debug("**user caps is: {}".format(user_capabilites))
-            if user_capabilites:
-                user_capabilities_names = set(user_capabilites.keys())
-            else:
-                user_capabilities_names = set()
-            if required_caps == {""}:
-                pass
-            elif not required_caps.issubset(user_capabilities_names):
-                msg = ("method '{}' requires capabilities {}, but capability {} "
-                       "was provided for user {}").format(method.__name__, required_caps,
-                                                          user_capabilites, user)
-                raise jsonrpc.exception_from_json(jsonrpc.UNAUTHORIZED, msg)
-            else:
-                # Now check if args passed to method are the ones allowed.
-
-                for cap_name, param_dict in user_capabilites.items():
-                    if (param_dict and required_caps and cap_name in required_caps):
-                        # if the method has required capabilities and
-                        # if the user capability has argument restrictions,
-                        # check if the args passed to method match the
-                        # requirement
-                        _log.debug("args = {} kwargs= {}".format(args, kwargs))
-                        args_dict = inspect.getcallargs(method, *args, **kwargs)
-                        _log.debug("dict = {}".format(args_dict))
-                        _log.debug("name= %r parameters allowed=%r", cap_name, param_dict)
-                        for name, value in param_dict.items():
-                            _log.debug("name= {} value={}".format(name, value))
-                            if name not in args_dict:
-                                raise jsonrpc.exception_from_json(
-                                    jsonrpc.UNAUTHORIZED,
-                                    "User {} capability is not defined "
-                                    "properly. method {} does not have "
-                                    "a parameter {}".format(user, method.__name__, name),
-                                )
-                            if _isregex(value):
-                                regex = re.compile("^" + value[1:-1] + "$")
-                                if not regex.match(args_dict[name]):
-                                    raise jsonrpc.exception_from_json(
-                                        jsonrpc.UNAUTHORIZED,
-                                        "User {} can call method {} only "
-                                        "with {} matching pattern {} but "
-                                        "called with {}={}".format(
-                                            user,
-                                            method.__name__,
-                                            name,
-                                            value,
-                                            name,
-                                            args_dict[name],
-                                        ),
-                                    )
-                            elif args_dict[name] != value:
-                                raise jsonrpc.exception_from_json(
-                                    jsonrpc.UNAUTHORIZED,
-                                    "User {} can call method {} only "
-                                    "with {}={} but called with "
-                                    "{}={}".format(
-                                        user,
-                                        method.__name__,
-                                        name,
-                                        value,
-                                        name,
-                                        args_dict[name],
-                                    ),
-                                )
-
+            calling_user = str(self.context.vip_message.user)
+            #method_name = method.__name__
+            # method.__name__ will give actual method name, but we want the alias used to export this method
+            # ex: export("actual_method_name", "alias_exported_which_will_be_used_by_caller")
+            method_name = self.context.vip_message.args[0]['method']
+            #args_dict = inspect.getcallargs(method, *args, **kwargs)
+            signature = inspect.signature(method)
+            bound_args = signature.bind(*args, **kwargs)
+            bound_args.apply_defaults()
+            args_dict = bound_args.arguments
+            # Remove self from args_dict if it exists to avoid sending the entire object across.
+            # Fixes Issue https://github.com/eclipse-volttron/volttron-core/issues/198
+            remove_self = args_dict.pop("self", None)
+            from volttron.types.auth import AuthException
+            try:
+                self.call(AUTH,
+                          method="check_rpc_authorization",
+                          identity=calling_user,
+                          method_name=f"{self.core().identity}.{method_name}",
+                          method_args=args_dict).get(timeout=10)
+            except AuthException as e:
+                # msg = ("method '{}' requires capabilities {}, but capability {} "
+                #        "was provided for user {}").format(method.__name__, required_caps,
+                #                                           user_capabilites, user)
+                raise jsonrpc.exception_from_json(jsonrpc.UNAUTHORIZED, e.args)
             return method(*args, **kwargs)
 
         return checked_method
+
+    def _wrap_protected_rpcs(self, protected_rpcs):
+        """
+        Iterates over exported methods and adds authorization checks
+        for protected methods
+        """
+        if protected_rpcs:
+            for method_name in self._exports:
+                if method_name in protected_rpcs:
+                    self._exports[method_name] = self._add_auth_check(self._exports[method_name])
+
+    def _add_protected_rpcs(self, updated_list: list[str]):
+        if not self._protected_rpcs:
+            # nothing was there before so set variable and update all
+            self._protected_rpcs = updated_list
+            self._wrap_protected_rpcs(self._protected_rpcs)
+        else:
+            newly_protected = set(updated_list) - set(self._protected_rpcs)
+            self._wrap_protected_rpcs(newly_protected)
+
+    def _remove_protected_rpcs(self, remove_list: list[str]):
+        if self._protected_rpcs is None:
+            self._protected_rpcs = self.get_protected_rpcs()
+        if self._protected_rpcs:
+            for r in remove_list:
+                if r in self._protected_rpcs:
+                    method = getattr(self._owner, r, None)
+                    # Verify the retrieved method object
+                    if method and inspect.ismethod(method):
+                        self._exports[r] = method
+                    else:
+                        raise ValueError(f"Method '{r}' not found in the instance or is not a method.")
 
     @spawn
     def _handle_external_rpc_subsystem(self, message):
@@ -364,10 +322,7 @@ class RPC(SubsystemBase):
             dispatch = self._dispatcher.dispatch
             # _log.debug("External RPC IN message args {}".format(message))
 
-            responses = [
-                response for response in (dispatch(msg, message) for msg in message.args)
-                if response
-            ]
+            responses = [response for response in (dispatch(msg, message) for msg in message.args) if response]
             # _log.debug("External RPC Responses {}".format(responses))
             if responses:
                 message.user = ""
@@ -399,8 +354,9 @@ class RPC(SubsystemBase):
                         user=message.user,
                         copy=False,
                     )
-                except ZMQError as ex:
-                    _log.error("ZMQ error: {}".format(ex))
+                except OSError as e:
+                    # why are we only logging and not throwing the exception
+                    # raise VIPError(e.errno, e.strerror, "", "external_rpc")
                     pass
         except KeyError:
             pass
@@ -409,46 +365,17 @@ class RPC(SubsystemBase):
     def _handle_subsystem(self, message):
         dispatch = self._dispatcher.dispatch
 
-        if self._message_bus == "rmq":
-            for idx, msg in enumerate(message.args):
-                if not isinstance(msg, dict):
-                    message.args[idx] = jsonapi.loads(msg)
-
-            responses = [
-                response for response in (dispatch(msg, message) for msg in message.args)
-                if response
-            ]
-        else:
-            responses = [
-                response for response in (dispatch(msg, message) for msg in message.args)
-                if response
-            ]
+        responses = [response for response in (dispatch(msg, message) for msg in message.args) if response]
         if responses:
             message.user = ""
             message.args = responses
             try:
                 if self._isconnected:
-                    if self._message_bus == "zmq":
-                        self.core().connection.send_vip_object(message, copy=False)
-                    else:
-                        # Agent is running on RMQ message bus.
-                        # Adding backward compatibility support for ZMQ.
-                        # Check if the peer is running on ZMQ bus.
-                        # If yes, send RPC message to proxy router
-                        # agent to forward using ZMQ message bus connection
-                        try:
-                            msg_bus = self.peer_list[message.peer]
-                        except KeyError:
-                            msg_bus = self._message_bus
-                        if msg_bus == "zmq":
-                            # If peer connected to ZMQ bus,
-                            # send via proxy router agent
-                            self.core().connection.send_vip_object_via_proxy(message)
-                        else:
-                            self.core().connection.send_vip_object(message, copy=False)
-            except ZMQError as exc:
-                if exc.errno == ENOTSOCK:
-                    _log.debug("Socket send on non-socket %s", self.core().identity)
+                    self.core().connection.send_vip_object(message, copy=False)
+            except OSError as e:
+                # why are we only logging
+                pass
+                #raise VIPError(e.errno, e.strerror, "", "RPC")
 
     def _handle_error(self, sender, message, error, **kwargs):
         result = self._outstanding.pop(message.id, None)
@@ -471,11 +398,11 @@ class RPC(SubsystemBase):
     def export(cls, name=None):    # pylint: disable=no-self-argument
         if name is not None and not isinstance(name, str):
             method, name = name, name.__name__
-            annotate(method, set, "rpc.exports", name)
+            annotate(method, set, "__rpc__.exports", name)
             return method
 
         def decorate(method):
-            annotate(method, set, "rpc.exports", name)
+            annotate(method, set, "__rpc__.exports", name)
             return method
 
         return decorate
@@ -494,12 +421,19 @@ class RPC(SubsystemBase):
             if self._isconnected:
                 try:
                     self.core().connection.send_vip(peer, "RPC", [request], msg_id=ident)
-                except ZMQError as exc:
-                    if exc.errno == ENOTSOCK:
-                        _log.debug("Socket send on non-socket %r", self.core().identity)
+                except OSError as e:
+                    pass
+                    # we were only logging. why?
+                    # raise VIPError(e.errno, e.strerror, peer, "RPC")
         return results or None
 
     def call(self, peer, method, *args, **kwargs):
+        if self._protected_rpcs is None and peer not in [AUTH, CONTROL_CONNECTION, CONTROL]:
+            # first rpc call
+            # TODO: can this be done on onconnect? or on some other event
+            self._protected_rpcs = self.get_protected_rpcs()
+            self._wrap_protected_rpcs(self._protected_rpcs)
+        self_ref = kwargs.pop("self", None)
         platform = kwargs.pop("external_platform", "")
         request, result = self._dispatcher.call(method, args, kwargs)
         ident = f"{next(self._counter)}.{hash(result)}"
@@ -510,50 +444,35 @@ class RPC(SubsystemBase):
         if not self._isconnected:
             return
 
-        if self._message_bus == "zmq":
-            if platform == "":    # local platform
-                subsystem = "RPC"
-                frames.append(request)
-            else:
-                frames = []
-                operation = "send_platform"
-                subsystem = "external_rpc"
-                frames.append(operation)
-                msg = dict(
-                    to_platform=platform,
-                    to_peer=peer,
-                    from_platform="",
-                    from_peer="",
-                    args=[request],
-                )
-                frames.append(msg)
-                peer = ""
-
-            try:
-                self.core().connection.send_vip(peer, subsystem, args=frames, msg_id=ident)
-            except ZMQError as exc:
-                if exc.errno == ENOTSOCK:
-                    _log.debug("Socket send on non-socket %r", self.core().identity)
+        if platform == "":    # local platform
+            subsystem = "RPC"
+            frames.append(request)
         else:
-            # Agent running on RMQ message bus.
-            # Adding backward compatibility support for ZMQ. Check if peer
-            # is running on ZMQ bus. If yes, send RPC message to proxy router
-            # agent to forward over ZMQ message bus connection
-            try:
-                peer_msg_bus = self.peer_list[peer]
-            except KeyError:
-                peer_msg_bus = self._message_bus
-            if peer_msg_bus == "zmq":
-                # peer connected to ZMQ bus, send via proxy router agent
-                self.core().connection.send_via_proxy(peer, "RPC", msg_id=ident, args=[request])
-            else:
-                self.core().connection.send_vip(peer,
-                                                "RPC",
-                                                args=[request],
-                                                msg_id=ident,
-                                                platform=platform)
+            frames = []
+            operation = "send_platform"
+            subsystem = "external_rpc"
+            frames.append(operation)
+            msg = dict(
+                to_platform=platform,
+                to_peer=peer,
+                from_platform="",
+                from_peer="",
+                args=[request],
+            )
+            frames.append(msg)
+            peer = ""
+
+        try:
+            self.core().connection.send_vip(peer, subsystem, args=frames, msg_id=ident)
+        except OSError as e:
+            pass
+            # we were only logging. why?
+            # raise VIPError(e.errno, e.strerror, peer, "RPC")
 
         return result
+
+    def get_protected_rpcs(self):
+        return self.call(AUTH, "get_protected_rpcs", self._owner.core.identity).get(timeout=10)
 
     __call__ = call
 
@@ -564,87 +483,27 @@ class RPC(SubsystemBase):
         if not self._isconnected:
             return
 
-        if self._message_bus == "zmq":
-            subsystem = None
-            if platform == "":
-                subsystem = "RPC"
-                frames.append(request)
-            else:
-                operation = "send_platform"
-                subsystem = "external_rpc"
-                frames.append(operation)
-                msg = dict(
-                    to_platform=platform,
-                    to_peer=peer,
-                    from_platform="",
-                    from_peer="",
-                    args=[request],
-                )
-                frames.append(msg)
-                peer = ""
-
-            try:
-                self.core().connection.send_vip(peer, subsystem, args=frames)
-            except ZMQError as exc:
-                if exc.errno == ENOTSOCK:
-                    _log.debug("Socket send on non-socket %r", self.core().identity)
+        subsystem = None
+        if platform == "":
+            subsystem = "RPC"
+            frames.append(request)
         else:
-            # Agent running on RMQ message bus.
-            # Adding backward compatibility support for ZMQ. Check if peer
-            # is running on ZMQ bus. If yes, send RPC message to proxy
-            # router agent to forward over ZMQ message bus connection
-            try:
-                peer_msg_bus = self.peer_list[peer]
-            except KeyError:
-                peer_msg_bus = self._message_bus
-            if peer_msg_bus == "zmq":
-                # peer connected to ZMQ bus, send via proxy router agent
-                self.core().connection.send_via_proxy(peer, "RPC", args=[request])
-            else:
-                self.core().connection.send_vip(peer, "RPC", args=[request], platform=platform)
+            operation = "send_platform"
+            subsystem = "external_rpc"
+            frames.append(operation)
+            msg = dict(
+                to_platform=platform,
+                to_peer=peer,
+                from_platform="",
+                from_peer="",
+                args=[request],
+            )
+            frames.append(msg)
+            peer = ""
 
-    @dualmethod
-    def allow(self, method, capabilities):
-        if isinstance(capabilities, str):
-            cap = set([capabilities])
-        else:
-            cap = set(capabilities)
-        # Necessary if you have provided an alias for the rpc method.
-        if isinstance(method, str):
-            if method in self._exports:
-                self._exports[method] = self._add_auth_check(self._exports[method], cap)
-            else:
-                _log.error("Method alias is not in RPC export list.")
-        else:
-            self._exports[method.__name__] = self._add_auth_check(method, cap)
-
-    @allow.classmethod
-    def allow(cls, capabilities):
-        """
-        Decorator specifies required agent capabilities to call a method.
-
-        This is designed to be used with the export decorator:
-
-        .. code-block:: python
-
-            @RPC.export
-            @RPC.allow('can_read_status')
-            def get_status():
-                ...
-
-        Multiple capabilities can be provided in a list:
-        .. code-block:: python
-
-            @RPC.allow(['can_read_status', 'can_call_my_methods'])
-
-        """
-
-        def decorate(method):
-            if isinstance(capabilities, str):
-                annotate(method, set, "rpc.allow_capabilities", capabilities)
-            else:
-                for cap in capabilities:
-                    annotate(method, set, "rpc.allow_capabilities", cap)
-            return method
-
-        return decorate
+        try:
+            self.core().connection.send_vip(peer, subsystem, args=frames)
+        except OSError as e:
+            pass
+            # we were only logging. why?
+            # raise VIPError(e.errno, e.strerror, peer, "RPC")

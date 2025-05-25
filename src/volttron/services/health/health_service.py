@@ -1,72 +1,71 @@
 # -*- coding: utf-8 -*- {{{
-# vim: set fenc=utf-8 ft=python sw=4 ts=4 sts=4 et:
+# ===----------------------------------------------------------------------===
 #
-# Copyright 2020, Battelle Memorial Institute.
+#                 Installable Component of Eclipse VOLTTRON
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# ===----------------------------------------------------------------------===
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+# Copyright 2022 Battelle Memorial Institute
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy
+# of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
 #
-# This material was prepared as an account of work sponsored by an agency of
-# the United States Government. Neither the United States Government nor the
-# United States Department of Energy, nor Battelle, nor any of their
-# employees, nor any jurisdiction or organization that has cooperated in the
-# development of these materials, makes any warranty, express or
-# implied, or assumes any legal liability or responsibility for the accuracy,
-# completeness, or usefulness or any information, apparatus, product,
-# software, or process disclosed, or represents that its use would not infringe
-# privately owned rights. Reference herein to any specific commercial product,
-# process, or service by trade name, trademark, manufacturer, or otherwise
-# does not necessarily constitute or imply its endorsement, recommendation, or
-# favoring by the United States Government or any agency thereof, or
-# Battelle Memorial Institute. The views and opinions of authors expressed
-# herein do not necessarily state or reflect those of the
-# United States Government or any agency thereof.
-#
-# PACIFIC NORTHWEST NATIONAL LABORATORY operated by
-# BATTELLE for the UNITED STATES DEPARTMENT OF ENERGY
-# under Contract DE-AC05-76RL01830
+# ===----------------------------------------------------------------------===
 # }}}
 
+import logging
 from collections import defaultdict
 from datetime import datetime
-import logging
 
-from volttron.client.known_identities import CONTROL_CONNECTION, PROCESS_IDENTITIES
-from volttron.utils import format_timestamp
-from volttron.client.vip.agent import Agent, Core, RPC
-
+from volttron.client.known_identities import (CONTROL_CONNECTION, PLATFORM_HEALTH,
+                                              PROCESS_IDENTITIES, CONTROL)
+from volttron.client.vip.agent import RPC, Agent, Core
+from volttron.server.decorators import service
 # TODO: rmq addition
 # from volttron.utils.rmq_config_params import RMQConfig
 # from volttron.utils.rmq_setup import start_rabbit, RabbitMQStartError
+# from volttron.services.auth.auth_service import AuthEntry, AuthFile
+from volttron.types import Service
+from volttron.types.service_interface import ServiceInterface
+from volttron.utils import format_timestamp, set_agent_identity
+from volttron.server.server_options import ServerOptions
 
 _log = logging.getLogger(__name__)
 
 
+@service
 class HealthService(Agent):
 
-    def __init__(self, **kwargs):
-        super(HealthService, self).__init__(**kwargs)
+    class Meta:
+        identity = PLATFORM_HEALTH
 
-        # Store the health stats for given peers in a dictionary with
-        # keys being the identity of the connected agent.
-        self._health_dict = defaultdict(dict)
+    def __init__(self, options: ServerOptions, **kwargs):
+        kwargs["identity"] = self.Meta.identity
 
-    def peer_added(self, peer):
+        with set_agent_identity(self.Meta.identity):
+            super().__init__(address=options.service_address, **kwargs)
+
+        self._health_dict: dict = {}
+
+    def peer_added(self, peer: str):
         """
         The `peer_added` method should be called whenever an agent is connected to the
         platform.
 
         :param peer: The identity of the agent connected to the platform
         """
+        if peer not in self._health_dict:
+            self._health_dict[peer] = dict()
+
         health = self._health_dict[peer]
 
         health["peer"] = peer
@@ -102,11 +101,15 @@ class HealthService(Agent):
 
         :return:
         """
+        agents = {}
         # Ignore the connection from control in the health as it will only be around for a short while.
-        agents = {
-            k: v
-            for k, v in self._health_dict.items() if not v.get("peer") == CONTROL_CONNECTION
-        }
+        if len(self._health_dict.items()) > 0:
+            agents = {
+                k: v
+                for k, v in self._health_dict.items()
+                if isinstance(v, dict) and v.get("peer") != CONTROL_CONNECTION
+            }
+        _log.debug(f"get_platform_health() -> {agents}")
         return agents
 
     def _heartbeat_updates(self, peer, sender, bus, topic, headers, message):
@@ -122,6 +125,11 @@ class HealthService(Agent):
         :param message:
         :return:
         """
+        # TODO: workaround for not getting notified by message bus when new peer connects
+        #  should be ok for now as client side will cache and clear cache after sometime
+        if sender not in self._health_dict:
+            self._health_dict[sender] = dict()
+
         health = self._health_dict[sender]
         time_now = format_timestamp(datetime.now())
         if not health:
@@ -134,5 +142,7 @@ class HealthService(Agent):
 
     @Core.receiver("onstart")
     def onstart(self, sender, **kwargs):
-        # Start subscribing to heartbeat topic to get updates from the health subsystem.
         self.vip.pubsub.subscribe("pubsub", "heartbeat", callback=self._heartbeat_updates)
+        # pl = self.vip.rpc.call(CONTROL, "peerlist").get()
+        # for peer in pl:
+        #     self._health_dict[peer] =

@@ -1,39 +1,25 @@
 # -*- coding: utf-8 -*- {{{
-# vim: set fenc=utf-8 ft=python sw=4 ts=4 sts=4 et:
+# ===----------------------------------------------------------------------===
 #
-# Copyright 2020, Battelle Memorial Institute.
+#                 Installable Component of Eclipse VOLTTRON
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# ===----------------------------------------------------------------------===
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+# Copyright 2022 Battelle Memorial Institute
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy
+# of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
 #
-# This material was prepared as an account of work sponsored by an agency of
-# the United States Government. Neither the United States Government nor the
-# United States Department of Energy, nor Battelle, nor any of their
-# employees, nor any jurisdiction or organization that has cooperated in the
-# development of these materials, makes any warranty, express or
-# implied, or assumes any legal liability or responsibility for the accuracy,
-# completeness, or usefulness or any information, apparatus, product,
-# software, or process disclosed, or represents that its use would not infringe
-# privately owned rights. Reference herein to any specific commercial product,
-# process, or service by trade name, trademark, manufacturer, or otherwise
-# does not necessarily constitute or imply its endorsement, recommendation, or
-# favoring by the United States Government or any agency thereof, or
-# Battelle Memorial Institute. The views and opinions of authors expressed
-# herein do not necessarily state or reflect those of the
-# United States Government or any agency thereof.
-#
-# PACIFIC NORTHWEST NATIONAL LABORATORY operated by
-# BATTELLE for the UNITED STATES DEPARTMENT OF ENERGY
-# under Contract DE-AC05-76RL01830
+# ===----------------------------------------------------------------------===
 # }}}
 
 import logging
@@ -41,8 +27,6 @@ import os
 import sys
 import re
 import traceback
-
-from volttron.utils import ClientContext as cc
 
 _log = logging.getLogger(__name__)
 
@@ -79,8 +63,13 @@ def get_address(verify_listening=False):
     """Return the VIP address of the platform
     If the VOLTTRON_VIP_ADDR environment variable is set, it is used to connect to.
     Otherwise, it is derived from get_home()."""
+    from volttron.utils import ClientContext as cc
+
+    import socket
+
     address = os.environ.get("VOLTTRON_VIP_ADDR")
     if not address:
+        # TODO: Shouldn't address be got from config next?
         # Connect via virtual unix socket if linux platform (mac doesn't have @ in it)
         abstract = "@" if sys.platform.startswith("linux") else ""
         address = "ipc://%s%s/run/vip.socket" % (
@@ -88,31 +77,29 @@ def get_address(verify_listening=False):
             cc.get_volttron_home(),
         )
 
-    import zmq.green as zmqgreen
-    import zmq
-
-    # The following block checks to make sure that we can
-    # connect to the zmq based upon the ipc address.
-    #
-    # The zmq.sock.bind() will raise an error because the
-    # address is already bound (therefore volttron is running there)
-    sock = None
+    new_sock = None
+    socket_port = None
+    if address.startswith("tcp://"):
+        socket_address = address[6:] # address after tcp://
+        socket_port = cc.get_config_param("port")
+    else:
+        socket_address = f"{cc.get_volttron_home()}/run/vip.socket"
     try:
-        # TODO: We should not just do the connection test when verfiy_listening is True but always
-        # Though we leave this here because we have backward compatible unit tests that require
-        # the get_address to not have somethiing bound to the address.
-        if verify_listening:
-            ctx = zmqgreen.Context.instance()
-            sock = ctx.socket(zmq.PUB)    # or SUB - does not make any difference
-            sock.bind(address)
-            raise ValueError("Unable to connect to vip address "
-                             f"make sure VOLTTRON_HOME: {cc.get_volttron_home()} "
-                             "is set properly")
-    except zmq.error.ZMQError as e:
-        _log.error(f"Zmq error was {e}\n{traceback.format_exc()}")
+        if socket_port:
+            new_sock = socket.socket(socket.AF_INET)
+            new_sock.bind((socket_address, socket_port))
+        else:
+            new_sock = socket.socket(socket.AF_UNIX)
+            new_sock.bind(socket_address)
+        raise ValueError("Unable to connect to vip address "
+                         f"make sure VOLTTRON_HOME: {cc.get_volttron_home()} "
+                         "is set properly")
+    except OSError as e:
+        if e.errno != 98:  # 98 = address already in use error
+            raise e
     finally:
         try:
-            sock.close()
+            new_sock.close()
         except AttributeError as e:    # Raised when sock is None type
             pass
 

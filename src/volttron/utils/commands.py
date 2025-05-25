@@ -1,56 +1,41 @@
 # -*- coding: utf-8 -*- {{{
-# vim: set fenc=utf-8 ft=python sw=4 ts=4 sts=4 et:
+# ===----------------------------------------------------------------------===
 #
-# Copyright 2020, Battelle Memorial Institute.
+#                 Installable Component of Eclipse VOLTTRON
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# ===----------------------------------------------------------------------===
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+# Copyright 2022 Battelle Memorial Institute
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy
+# of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
 #
-# This material was prepared as an account of work sponsored by an agency of
-# the United States Government. Neither the United States Government nor the
-# United States Department of Energy, nor Battelle, nor any of their
-# employees, nor any jurisdiction or organization that has cooperated in the
-# development of these materials, makes any warranty, express or
-# implied, or assumes any legal liability or responsibility for the accuracy,
-# completeness, or usefulness or any information, apparatus, product,
-# software, or process disclosed, or represents that its use would not infringe
-# privately owned rights. Reference herein to any specific commercial product,
-# process, or service by trade name, trademark, manufacturer, or otherwise
-# does not necessarily constitute or imply its endorsement, recommendation, or
-# favoring by the United States Government or any agency thereof, or
-# Battelle Memorial Institute. The views and opinions of authors expressed
-# herein do not necessarily state or reflect those of the
-# United States Government or any agency thereof.
-#
-# PACIFIC NORTHWEST NATIONAL LABORATORY operated by
-# BATTELLE for the UNITED STATES DEPARTMENT OF ENERGY
-# under Contract DE-AC05-76RL01830
+# ===----------------------------------------------------------------------===
 # }}}
 
 __all__ = [
     "execute_command", "vip_main", "is_volttron_running", "wait_for_volttron_startup",
-    "wait_for_volttron_shutdown", "start_agent_thread"
+    "wait_for_volttron_shutdown", "start_agent_thread", "isapipe"
 ]
 
 import logging
 import os
+from pathlib import Path
 import subprocess
 import stat
 import sys
 
 import gevent
 import psutil
-
-from ..utils import (ClientContext as cc, get_address, is_valid_identity)
 
 _log = logging.getLogger(__name__)
 
@@ -65,7 +50,7 @@ def execute_command(cmds, env=None, cwd=None, logger=None, err_prefix=None) -> s
     :param cmds:list of commands to pass to subprocess.run
     :param env: environment to run the command with
     :param cwd: working directory for the command
-    :param logger: a logger to use if errors occure
+    :param logger: a logger to use if errors occur
     :param err_prefix: an error prefix to allow better tracing through the error message
     :return: stdout string if successful
 
@@ -110,8 +95,11 @@ def isapipe(fd):
     return stat.S_ISFIFO(os.fstat(fd).st_mode)
 
 
-def vip_main(agent_class, identity=None, version="0.1", **kwargs):
+def vip_main(agent_class, version: str = "0.1", **kwargs):
     """Default main entry point implementation for VIP agents."""
+    from volttron.client.vip.agent import Agent
+    from volttron.utils import (ClientContext as cc, is_valid_identity, get_address)
+    from volttron.types.auth.auth_credentials import CredentialsFactory
     try:
         # If stdout is a pipe, re-open it line buffered
         if isapipe(sys.stdout):
@@ -124,67 +112,31 @@ def vip_main(agent_class, identity=None, version="0.1", **kwargs):
         Hub = gevent.hub.Hub
         Hub.NOT_ERROR = Hub.NOT_ERROR + (KeyboardInterrupt, )
 
-        config = os.environ.get("AGENT_CONFIG")
-        identity = os.environ.get("AGENT_VIP_IDENTITY", identity)
-        publickey = kwargs.pop("publickey", None)
-        if not publickey:
-            publickey = os.environ.get("AGENT_PUBLICKEY")
-        secretkey = kwargs.pop("secretkey", None)
-        if not secretkey:
-            secretkey = os.environ.get("AGENT_SECRETKEY")
-        serverkey = kwargs.pop("serverkey", None)
-        if not serverkey:
-            serverkey = os.environ.get("VOLTTRON_SERVERKEY")
+        config = os.environ.pop("AGENT_CONFIG", {})
+        identity = os.environ.pop("AGENT_VIP_IDENTITY", None)
+        address = os.environ.pop("VOLTTRON_PLATFORM_ADDRESS", None)
 
-        # AGENT_PUBLICKEY and AGENT_SECRETKEY must be specified
-        # for the agent to execute successfully.  aip should set these
-        # if the agent is run from the platform.  If run from the
-        # run command it should be set automatically from vctl and
-        # added to the server.
-        #
-        # TODO: Make required for all agents.  Handle it through vctl and aip.
+        creds = CredentialsFactory.load_from_environ()
+        del os.environ["AGENT_CREDENTIALS"]
+
         if not os.environ.get("_LAUNCHED_BY_PLATFORM"):
-            if not publickey or not secretkey:
-                raise ValueError("AGENT_PUBLIC and AGENT_SECRET environmental variables must "
-                                 "be set to run without the platform.")
+            if not creds:
+                raise ValueError(
+                    "Please set AGENT_CREDENTIALS to the credentials to connect to the server.")
+            if not address:
+                raise ValueError(
+                    "Please set VOLTTRON_PLATFORM_ADDRESS to the address for connecting to the server."
+                )
 
-        message_bus = os.environ.get("MESSAGEBUS", "zmq")
+        if identity != creds.identity:
+            raise ValueError("AGENT_VIP_IDENTITY and identity from credentials do not match!")
+
         if identity is not None:
             if not is_valid_identity(identity):
-                _log.warning("Deprecation warining")
+                _log.warning("Deprecation warning")
                 _log.warning(f"All characters in {identity} are not in the valid set.")
 
-        address = get_address()
-        agent_uuid = os.environ.get("AGENT_UUID")
-        volttron_home = cc.get_volttron_home()
-
-        # TODO Bring back certs
-        # from volttron.client.certs import Certs
-        # certs = Certs()
-        if agent_class.__name__ == "Agent":
-            agent = agent_class(config_path=config,
-                                identity=identity,
-                                address=address,
-                                agent_uuid=agent_uuid,
-                                volttron_home=volttron_home,
-                                version=version,
-                                message_bus=message_bus,
-                                publickey=publickey,
-                                secretkey=secretkey,
-                                serverkey=serverkey,
-                                **kwargs)
-        else:
-            agent = agent_class(config_path=config,
-                                identity=identity,
-                                address=address,
-                                agent_uuid=agent_uuid,
-                                volttron_home=volttron_home,
-                                version=version,
-                                message_bus=message_bus,
-                                publickey=publickey,
-                                secretkey=secretkey,
-                                serverkey=serverkey,
-                                **kwargs)
+        agent = agent_class(credentials=creds, config_path=config, address=address, **kwargs)
 
         try:
             run = agent.run
