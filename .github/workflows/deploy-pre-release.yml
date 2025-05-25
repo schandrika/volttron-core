@@ -6,7 +6,7 @@ on:
     types:
       - closed
     branches:
-      - develop
+      - develop_test
 
 defaults:
   run:
@@ -114,3 +114,4 @@ jobs:
 #        run: |
 #          poetry config pypi-token.pypi ${{ secrets.PYPI_TOKEN }}
 #          poetry publish
+
