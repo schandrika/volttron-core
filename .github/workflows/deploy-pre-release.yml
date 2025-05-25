@@ -19,14 +19,13 @@ env:
   OWNER: eclipse-volttron
   POETRY_VERSION: '2.1.1'
 
-permissions:
-  contents: write
-
 jobs:
 
   deploy-pre-release:
     if: ${{ github.event.pull_request.merged && ! startsWith(github.ref_name, 'releases/') && github.ref_name != 'main' && ! contains(github.event.pull_request.labels.*.name, 'documentation') }}
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
       - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
       - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
